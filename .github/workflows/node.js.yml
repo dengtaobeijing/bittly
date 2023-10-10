@@ -1,0 +1,121 @@
+name: Build App Packages
+
+on: workflow_dispatch
+
+jobs:
+  # build windows packages for 32 and 64 bit.
+  build-window-packages:
+    runs-on: windows-2022
+    steps:
+      # node.js
+      - name: Set up node 16.19.0
+        uses: actions/setup-node@v3
+        with:
+          node-version: 16.19.0
+      
+      # python2
+      - name: Set up python 2.7 
+        uses: actions/setup-python@v4
+        with:
+          python-version: 2.7 
+
+      # python3
+      - name: Set up python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.11
+      
+      # msbuild
+      - name: Set up msbuild 15.9
+        uses: microsoft/setup-msbuild@v1.1
+        with:
+          vs-version: 15.9
+
+      # checkout 
+      - name: Checkout repository
+        uses: actions/checkout@v1
+
+      # remove .npmrc
+      - name: Remove .npmrc
+        run: Remove-Item .npmrc
+
+      # get version
+      - name: Read package version
+        id: package-json
+        uses: Saionaro/extract-package-version@v1.0.6
+      
+      # cache qshell tool
+      - name: Cache qshell
+        id: cache-qshell
+        uses: actions/cache@v3
+        with:
+          path: ./qshell.exe
+          key: ${{runner.os}}-qshell
+      
+      # download qshell
+      - name: Download qshell
+        if: steps.cache-qshell.outputs.cache-hit != 'true'
+        run: |
+          Invoke-RestMethod -Uri 'https://devtools.qiniu.com/qshell-v2.9.2-windows-386.zip' -OutFile 'qshell.zip'
+          Expand-Archive -LiteralPath qshell.zip -DestinationPath ./
+    
+      # setup qshell
+      - name: Setup qshell
+        run: ./qshell account ${{secrets.QINIU_AK}} ${{secrets.QINIU_SK}} ${{secrets.QINIU_ACCOUNT_NAME}}
+
+      # install deps
+      - name: Install dependences
+        run: npm install --python=python2.7
+
+      # build 64bit package and upload
+      - name: Build for x64
+        run: npm run electron:build -- --x64
+
+      # upload package
+      - name: Upload x64.exe to CDN
+        run: >
+          ./qshell fput ${{secrets.QINIU_BUCKET}} 
+          download/$env:appver/bittly-$env:appver-x64.exe 
+          ./dist_electron/bittly-$env:appver-win-x64.exe 
+        env:
+          appver: ${{steps.package-json.outputs.version}}
+
+      # update server variables
+      - name: Update latest.yml content
+        run: >
+          curl --location --request POST 'https://bittly.sigechen.com/deploy/set-update-file' 
+          --form 'yml=@"./dist_electron/latest.yml"' 
+          --form 'platform="win32"'
+          --form 'arch="x64"'
+          --form 'filename="latest.yml"'
+          --form "packname=bittly-$env:appver-x64.exe"
+          --form 'secret="${{secrets.SERVER_DEPLOY_SECRET}}"'
+        env:
+          appver: ${{steps.package-json.outputs.version}}
+
+      # update server variables
+      - name: Update release time
+        run: >
+          curl --location --request POST 'https://bittly.sigechen.com/deploy/set-variable' 
+          --form 'key="windows_released_at"' 
+          --form "value=$(date '+%Y-%m-%d')" 
+          --form 'secret="${{secrets.SERVER_DEPLOY_SECRET}}"' -s
+      # update server variables
+      - name: Update release version
+        run: >
+          curl --location --request POST 'https://bittly.sigechen.com/deploy/set-variable' 
+          --form 'key="windows_released_version"' 
+          --form "value=$env:appver" 
+          --form 'secret="${{secrets.SERVER_DEPLOY_SECRET}}"' -s
+        env:
+          appver: ${{steps.package-json.outputs.version}}
+
+      # update server variables
+      - name: Update release size for x64
+        run: >
+          curl --location --request POST 'https://bittly.sigechen.com/deploy/set-variable' 
+          --form 'key="windows_released_size_exe_x64"' 
+          --form "value=$([Math]::Truncate((Get-Item -Path ./dist_electron/bittly-$env:appver-win-x64.exe).Length/1MB*100)/100)MB" 
+          --form 'secret="${{secrets.SERVER_DEPLOY_SECRET}}"' -s
+        env:
+          appver: ${{steps.package-json.outputs.version}}
